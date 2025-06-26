@@ -10,14 +10,21 @@ from datetime import datetime, timedelta
 import jwt 
 
 # --- CONFIGURACIÓN INICIAL ---
-load_dotenv()
+load_dotenv() # Carga las variables de entorno del archivo .env local
 app = Flask(__name__)
-CORS(app) 
+
+# Configuración de CORS: Permite solo tu URL de frontend en producción
+# Si FRONTEND_URL está definida, CORS se restringe a esa URL.
+# Si no está definida (ej. en desarrollo local), permite todas las solicitudes.
+FRONTEND_URL = os.getenv('FRONTEND_URL') # Esta variable se define en Render.com
+if FRONTEND_URL:
+    CORS(app, origins=[FRONTEND_URL])
+else:
+    CORS(app) # Permite todas las CORS para desarrollo local si FRONTEND_URL no está establecida.
+
 bcrypt = Bcrypt(app)
 
 # Configuración de la clave secreta para JWT
-# ¡IMPORTANTE! Asegúrate de que esta variable esté definida en tu archivo .env
-# Usa un valor largo y aleatorio, generado con python -c "import secrets; print(secrets.token_hex(32))"
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY') 
 app.config['JWT_ALGORITHM'] = 'HS256' 
 
@@ -305,7 +312,6 @@ def update_web_config():
             key = update.get('key')
             value = update.get('value')
             if key:
-                # Esta consulta SQL hace un "UPSERT": inserta si la clave no existe, o actualiza si ya existe.
                 query = "INSERT INTO web_config (config_key, config_value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE config_value = %s"
                 cursor.execute(query, (key, value, value))
         
@@ -329,8 +335,9 @@ def chat_with_gemini():
     if not chat_contents:
         return jsonify({"error": "No hay contenido de chat proporcionado."}), 400
 
-    if not app.config.get('GEMINI_API_KEY'):
-        return jsonify({"error": "La clave API de Gemini no está configurada en el servidor."}), 500
+    gemini_api_key = app.config.get('GEMINI_API_KEY')
+    if not gemini_api_key:
+        return jsonify({"error": "La clave API de Gemini no está configurada en el servidor (en las variables de entorno de Render)."}), 500
 
     try:
         gemini_payload = {
@@ -341,14 +348,13 @@ def chat_with_gemini():
             "Content-Type": "application/json"
         }
         
-        # Realizar la llamada a la API real de Gemini
         response = requests.post(
-            f"{GEMINI_API_BASE_URL}?key={app.config['GEMINI_API_KEY']}",
+            f"{GEMINI_API_BASE_URL}?key={gemini_api_key}", 
             json=gemini_payload,
             headers=gemini_headers,
-            timeout=30 # Tiempo de espera para la respuesta de Gemini
+            timeout=30 
         )
-        response.raise_for_status() # Lanza HTTPError para respuestas 4xx/5xx
+        response.raise_for_status() 
 
         gemini_response_data = response.json()
         return jsonify(gemini_response_data), 200
@@ -363,15 +369,15 @@ def chat_with_gemini():
 
 # --- PUNTO DE ENTRADA DE LA APLICACIÓN ---
 if __name__ == '__main__':
-    # Genera una clave secreta fuerte si no existe para desarrollo.
-    # EN PRODUCCIÓN, SIEMPRE USA OS.URANDOM O UNA GENERACIÓN EXTERNA SEGURA.
+    # Advertencias para desarrollo local si las claves no están definidas
+    # En producción, estas variables se establecerán en Render.com
     if app.config['SECRET_KEY'] is None:
-        print("ADVERTENCIA: SECRET_KEY no está configurada en .env. Usando una clave temporal.")
-        print("Esto NO es seguro para producción. Define SECRET_KEY en tu archivo .env")
-        app.config['SECRET_KEY'] = os.urandom(24).hex() # Genera una clave aleatoria temporal
+        print("ADVERTENCIA: SECRET_KEY no está configurada en .env. Esto NO es seguro para producción.")
     
     if app.config['GEMINI_API_KEY'] is None:
         print("ADVERTENCIA: GEMINI_API_KEY no está configurada en .env.")
-        print("El chatbot de Gemini no funcionará sin ella. Define GEMINI_API_KEY en tu archivo .env")
-
-    app.run(debug=True, port=5001)
+        print("El chatbot de Gemini no funcionará correctamente sin ella en este entorno.")
+    
+    # Esta línea es para ejecutar en desarrollo local con `python app.py`.
+    # En Render, Gunicorn ejecutará la aplicación usando el Procfile.
+    app.run(port=5001)
