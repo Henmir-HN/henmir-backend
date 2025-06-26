@@ -2,22 +2,40 @@ import os
 import mysql.connector
 import requests
 from flask import Flask, jsonify, request
-from flask_cors import CORS
+from flask_cors import CORS # Mantenemos esta importación, ya que Flask-CORS maneja otras partes de la negociación CORS como los preflight requests.
 from flask_bcrypt import Bcrypt
 from dotenv import load_dotenv
 import time
 from datetime import datetime, timedelta
 import jwt 
+import logging # ¡NUEVO! Importamos la librería de logging
 
 # --- CONFIGURACIÓN INICIAL ---
-load_dotenv()
+
+# ¡NUEVO! Configuramos el logging para que los mensajes aparezcan en los logs de Render
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.info("Iniciando aplicación Flask Henmir Backend...")
+
+load_dotenv() # Carga las variables de entorno del archivo .env local
 app = Flask(__name__)
-CORS(app) 
+
+# Configuración de CORS
+FRONTEND_URL = os.getenv('FRONTEND_URL') # Esta variable se define en Render.com
+
+if FRONTEND_URL:
+    # ¡NUEVO! Logueamos la URL que se está detectando para CORS
+    logging.info(f"FRONTEND_URL detectada: {FRONTEND_URL}. Configurando CORS para esta URL.")
+    # Inicializamos Flask-CORS con la URL específica. supports_credentials es importante para JWT.
+    CORS(app, origins=[FRONTEND_URL], supports_credentials=True) 
+else:
+    # ¡NUEVO! Logueamos que no se detectó FRONTEND_URL
+    logging.warning("FRONTEND_URL NO detectada en las variables de entorno. Permitiendo CORS para todas las origenes (MODO DESARROLLO).")
+    # Para desarrollo local, permitimos todas las origenes.
+    CORS(app, supports_credentials=True) 
+
 bcrypt = Bcrypt(app)
 
 # Configuración de la clave secreta para JWT
-# ¡IMPORTANTE! Asegúrate de que esta variable esté definida en tu archivo .env
-# Usa un valor largo y aleatorio, generado con python -c "import secrets; print(secrets.token_hex(32))"
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY') 
 app.config['JWT_ALGORITHM'] = 'HS256' 
 
@@ -43,7 +61,7 @@ def get_db_connection():
         conn = mysql.connector.connect(**db_config)
         return conn
     except mysql.connector.Error as err:
-        print(f"Error de conexión a la base de datos: {err}")
+        logging.error(f"Error de conexión a la base de datos: {err}") # ¡NUEVO! Logueamos errores de DB
         return None
 
 # --- DECORADOR PARA RUTAS PROTEGIDAS CON JWT ---
@@ -63,15 +81,19 @@ def token_required(f):
                 token = auth_header.split(' ')[1]
 
         if not token:
+            logging.warning("Acceso no autorizado: Token de autenticación requerido.") # ¡NUEVO!
             return jsonify({"error": "Token de autenticación es requerido!"}), 401 
 
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=[app.config['JWT_ALGORITHM']])
         except jwt.ExpiredSignatureError:
+            logging.warning("Acceso no autorizado: Token de autenticación ha expirado.") # ¡NUEVO!
             return jsonify({"error": "Token de autenticación ha expirado."}), 401
         except jwt.InvalidTokenError:
+            logging.warning("Acceso no autorizado: Token de autenticación inválido.") # ¡NUEVO!
             return jsonify({"error": "Token de autenticación inválido."}), 401
         except Exception as e:
+            logging.error(f"Error inesperado al decodificar token: {str(e)}") # ¡NUEVO!
             return jsonify({"error": f"Error inesperado al decodificar token: {str(e)}"}), 401
 
         return f(*args, **kwargs)
@@ -127,6 +149,7 @@ def get_user_profile(identity_number):
     Según la especificación del usuario, no requiere autenticación en el backend.
     """
     if not GSHEET_API_URL:
+        logging.error("GSHEET_API_URL no configurada.") # ¡NUEVO!
         return jsonify({"error": "La conexión a la fuente de datos secundaria no está configurada."}), 500
     try:
         params = {'action': 'getProfileByIdentity', 'identity': identity_number}
@@ -137,8 +160,10 @@ def get_user_profile(identity_number):
         if gsheet_data.get('success'):
             return jsonify(gsheet_data.get('data'))
         else:
+            logging.warning(f"Perfil de usuario no encontrado para identidad: {identity_number}. Error: {gsheet_data.get('error', 'Desconocido')}") # ¡NUEVO!
             return jsonify({"error": gsheet_data.get('error', 'Usuario no encontrado')}), 404
     except requests.exceptions.RequestException as e:
+        logging.error(f"Error al consultar Google Sheet API: {str(e)}") # ¡NUEVO!
         return jsonify({"error": f"No se pudo consultar la fuente de datos secundaria: {str(e)}"}), 503
 
 @app.route('/login', methods=['POST'])
@@ -148,6 +173,7 @@ def login():
     """
     data = request.get_json()
     if not data or not data.get('email') or not data.get('password'):
+        logging.warning("Intento de login con credenciales incompletas.") # ¡NUEVO!
         return jsonify({"error": "Email y contraseña son requeridos"}), 400
     
     email = data['email']
@@ -169,13 +195,14 @@ def login():
             'exp': datetime.utcnow() + timedelta(minutes=60) 
         }
         token = jwt.encode(payload, app.config['SECRET_KEY'], algorithm=app.config['JWT_ALGORITHM'])
-
+        logging.info(f"Login de administrador exitoso para: {email}") # ¡NUEVO!
         return jsonify({
             "message": "Login de administrador exitoso", 
             "admin": {"nombre": admin['nombre'], "email": admin['email']},
             "token": token 
         })
     else:
+        logging.warning(f"Intento de login fallido para: {email}") # ¡NUEVO!
         return jsonify({"error": "Credenciales de administrador inválidas"}), 401
 
 @app.route('/vacancies', methods=['GET', 'POST'])
@@ -203,6 +230,7 @@ def manage_vacancies():
             data = request.get_json()
             if not data or not data.get('puesto') or not data.get('ciudad'):
                 conn.close()
+                logging.warning("Intento de crear vacante con datos incompletos.") # ¡NUEVO!
                 return jsonify({"error": "Puesto y ciudad son requeridos"}), 400
             
             vacancy_id = f"VAC-{int(time.time() * 1000)}"
@@ -211,6 +239,7 @@ def manage_vacancies():
             cursor.execute(query, values)
             conn.commit()
             conn.close()
+            logging.info(f"Vacante creada con éxito: {vacancy_id}") # ¡NUEVO!
             return jsonify({"message": "Vacante creada con éxito", "vacancy_id": vacancy_id}), 201
         
         return _create_vacancy()
@@ -228,8 +257,10 @@ def delete_vacancy(vacancy_id):
     conn.commit()
     conn.close()
     if cursor.rowcount > 0:
+        logging.info(f"Vacante eliminada: {vacancy_id}") # ¡NUEVO!
         return jsonify({"message": "Vacante eliminada"}), 200
     else:
+        logging.warning(f"Intento de eliminar vacante no encontrada: {vacancy_id}") # ¡NUEVO!
         return jsonify({"error": "Vacante no encontrada"}), 404
 
 @app.route('/posts', methods=['GET', 'POST'])
@@ -256,6 +287,7 @@ def manage_posts():
             data = request.get_json()
             if not data or not data.get('titulo'):
                 conn.close()
+                logging.warning("Intento de crear post con datos incompletos.") # ¡NUEVO!
                 return jsonify({"error": "El título es requerido"}), 400
             
             post_id = f"POST-{int(time.time() * 1000)}"
@@ -264,6 +296,7 @@ def manage_posts():
             cursor.execute(query, values)
             conn.commit()
             conn.close()
+            logging.info(f"Post creado con éxito: {post_id}") # ¡NUEVO!
             return jsonify({"message": "Post creado con éxito", "post_id": post_id}), 201
         
         return _create_post()
@@ -281,8 +314,10 @@ def delete_post(post_id):
     conn.commit()
     conn.close()
     if cursor.rowcount > 0:
+        logging.info(f"Post eliminado: {post_id}") # ¡NUEVO!
         return jsonify({"message": "Post eliminado"}), 200
     else:
+        logging.warning(f"Intento de eliminar post no encontrado: {post_id}") # ¡NUEVO!
         return jsonify({"error": "Post no encontrado"}), 404
 
 @app.route('/web-config', methods=['POST'])
@@ -294,6 +329,7 @@ def update_web_config():
     """
     data = request.get_json()
     if not data or 'updates' not in data or not isinstance(data['updates'], list):
+        logging.warning("Intento de actualizar web-config con formato de datos incorrecto.") # ¡NUEVO!
         return jsonify({"error": "Formato de datos incorrecto. Se esperaba una lista de 'updates'."}), 400
     
     conn = get_db_connection()
@@ -305,14 +341,15 @@ def update_web_config():
             key = update.get('key')
             value = update.get('value')
             if key:
-                # Esta consulta SQL hace un "UPSERT": inserta si la clave no existe, o actualiza si ya existe.
                 query = "INSERT INTO web_config (config_key, config_value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE config_value = %s"
                 cursor.execute(query, (key, value, value))
         
         conn.commit()
         conn.close()
+        logging.info("Contenido web actualizado con éxito.") # ¡NUEVO!
         return jsonify({"message": "Contenido web actualizado con éxito."}), 200
     except mysql.connector.Error as err:
+        logging.error(f"Error en la base de datos al actualizar web-config: {err}") # ¡NUEVO!
         conn.close()
         return jsonify({"error": f"Error en la base de datos: {err}"}), 500
 
@@ -327,10 +364,13 @@ def chat_with_gemini():
     chat_contents = user_request_data.get('contents')
 
     if not chat_contents:
+        logging.warning("Chatbot: No hay contenido de chat proporcionado.") # ¡NUEVO!
         return jsonify({"error": "No hay contenido de chat proporcionado."}), 400
 
-    if not app.config.get('GEMINI_API_KEY'):
-        return jsonify({"error": "La clave API de Gemini no está configurada en el servidor."}), 500
+    gemini_api_key = app.config.get('GEMINI_API_KEY')
+    if not gemini_api_key:
+        logging.error("Chatbot: La clave API de Gemini no está configurada en el servidor.") # ¡NUEVO!
+        return jsonify({"error": "La clave API de Gemini no está configurada en el servidor (en las variables de entorno de Render)."}), 500
 
     try:
         gemini_payload = {
@@ -341,37 +381,59 @@ def chat_with_gemini():
             "Content-Type": "application/json"
         }
         
-        # Realizar la llamada a la API real de Gemini
         response = requests.post(
-            f"{GEMINI_API_BASE_URL}?key={app.config['GEMINI_API_KEY']}",
+            f"{GEMINI_API_BASE_URL}?key={gemini_api_key}", 
             json=gemini_payload,
             headers=gemini_headers,
-            timeout=30 # Tiempo de espera para la respuesta de Gemini
+            timeout=30 
         )
-        response.raise_for_status() # Lanza HTTPError para respuestas 4xx/5xx
+        response.raise_for_status() 
 
         gemini_response_data = response.json()
+        logging.info("Chatbot: Respuesta de Gemini recibida con éxito.") # ¡NUEVO!
         return jsonify(gemini_response_data), 200
 
     except requests.exceptions.RequestException as e:
-        print(f"Error al llamar a la API de Gemini: {e}")
+        logging.error(f"Chatbot: Error al llamar a la API de Gemini: {e}") # ¡NUEVO!
         return jsonify({"error": f"Error de comunicación con el asistente de IA: {str(e)}"}), 500
     except Exception as e:
-        print(f"Error inesperado en el proxy de Gemini: {e}")
+        logging.error(f"Chatbot: Error inesperado en el proxy de Gemini: {e}") # ¡NUEVO!
         return jsonify({"error": "Ocurrió un error inesperado en el servidor al procesar el chat."}), 500
 
+# ¡NUEVO! Este decorador se ejecuta DESPUÉS de cada solicitud
+@app.after_request
+def add_cors_headers(response):
+    # Verificamos si FRONTEND_URL está definida en las variables de entorno de Render
+    if FRONTEND_URL:
+        # Esto asegura que la cabecera 'Access-Control-Allow-Origin' se establezca
+        # con la URL exacta de tu frontend en GitHub Pages.
+        response.headers['Access-Control-Allow-Origin'] = FRONTEND_URL
+        logging.info(f"CORS: Cabecera 'Access-Control-Allow-Origin' establecida a: {FRONTEND_URL}")
+    else:
+        # En modo de desarrollo local (si FRONTEND_URL no está establecida), permitimos todas las origenes.
+        response.headers['Access-Control-Allow-Origin'] = "*"
+        logging.warning("CORS: FRONTEND_URL no está definida. Cabecera 'Access-Control-Allow-Origin' establecida a '*'.")
+
+    # Configuramos los métodos HTTP permitidos
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    # Configuramos las cabeceras personalizadas que el frontend puede enviar (importante para 'Authorization')
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    # Esto es crucial si tu frontend envía cookies o tokens de autenticación
+    response.headers['Access-Control-Allow-Credentials'] = 'true'
+    
+    return response
 
 # --- PUNTO DE ENTRADA DE LA APLICACIÓN ---
 if __name__ == '__main__':
-    # Genera una clave secreta fuerte si no existe para desarrollo.
-    # EN PRODUCCIÓN, SIEMPRE USA OS.URANDOM O UNA GENERACIÓN EXTERNA SEGURA.
+    # Advertencias para desarrollo local si las claves no están definidas
+    # En producción, estas variables se establecerán en Render.com
     if app.config['SECRET_KEY'] is None:
-        print("ADVERTENCIA: SECRET_KEY no está configurada en .env. Usando una clave temporal.")
-        print("Esto NO es seguro para producción. Define SECRET_KEY en tu archivo .env")
-        app.config['SECRET_KEY'] = os.urandom(24).hex() # Genera una clave aleatoria temporal
+        logging.warning("ADVERTENCIA: SECRET_KEY no está configurada en .env. Esto NO es seguro para producción.")
     
     if app.config['GEMINI_API_KEY'] is None:
-        print("ADVERTENCIA: GEMINI_API_KEY no está configurada en .env.")
-        print("El chatbot de Gemini no funcionará sin ella. Define GEMINI_API_KEY en tu archivo .env")
-
-    app.run(debug=True, port=5001)
+        logging.warning("ADVERTENCIA: GEMINI_API_KEY no está configurada en .env.")
+        logging.warning("El chatbot de Gemini no funcionará correctamente sin ella en este entorno.")
+    
+    # Esta línea es para ejecutar en desarrollo local con `python app.py`.
+    # En Render, Gunicorn ejecutará la aplicación usando el Procfile, que NO usa debug=True.
+    app.run(port=5001)
