@@ -16,28 +16,25 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logging.info("Iniciando aplicación Flask Henmir Backend...")
 
-load_dotenv() # Carga las variables de entorno del archivo .env local
+load_dotenv() 
 app = Flask(__name__)
 
 # Configuración de CORS: Permite solo tu URL de frontend en producción
-FRONTEND_URL = os.getenv('FRONTEND_URL') # Esta variable se define en Render.com
+# Se ha corregido el problema del duplicado del bloque de CORS que tenías antes.
+FRONTEND_URL = os.getenv('FRONTEND_URL') 
 
 if FRONTEND_URL:
     logging.info(f"FRONTEND_URL detectada: {FRONTEND_URL}. Configurando CORS para esta URL.")
-    # Inicializamos Flask-CORS con la URL específica. supports_credentials es importante para JWT.
     CORS(app, origins=[FRONTEND_URL], supports_credentials=True) 
 else:
     logging.warning("FRONTEND_URL NO detectada en las variables de entorno. Permitiendo CORS para todas las origenes (MODO DESARROLLO).")
-    # Para desarrollo local, permitimos todas las origenes.
     CORS(app, supports_credentials=True) 
 
 bcrypt = Bcrypt(app)
 
-# Configuración de la clave secreta para JWT
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY') 
 app.config['JWT_ALGORITHM'] = 'HS256' 
 
-# Configuración para la API de Gemini (desde .env del backend)
 app.config['GEMINI_API_KEY'] = os.getenv('GEMINI_API_KEY')
 
 db_config = {
@@ -108,7 +105,7 @@ def index():
 def get_public_data():
     """
     Obtiene los datos públicos del portal (vacantes activas, posts recientes, contenido web).
-    No requiere autenticación.
+    Ahora también incluye Términos y Condiciones y Política de Privacidad.
     """
     conn = get_db_connection()
     if not conn: return jsonify({"error": "Error de conexión"}), 500
@@ -122,7 +119,7 @@ def get_public_data():
     cursor.execute("SELECT * FROM posts ORDER BY created_at DESC LIMIT 3")
     posts = cursor.fetchall()
     
-    # Obtener configuración del contenido web (misión, visión, imágenes hero, y AHORA contacto)
+    # Obtener configuración del contenido web (misión, visión, imágenes hero, contacto, y AHORA términos/privacidad)
     cursor.execute("SELECT config_key, config_value FROM web_config")
     config_rows = cursor.fetchall()
     web_content = {row['config_key']: row['config_value'] for row in config_rows}
@@ -146,6 +143,7 @@ def get_user_profile(identity_number):
     Obtiene el perfil de un candidato desde una fuente de datos secundaria (Google Sheet API).
     Según la especificación del usuario, no requiere autenticación en el backend.
     """
+    logging.info(f"Intento de obtener perfil para identidad: {identity_number}") 
     if not GSHEET_API_URL:
         logging.error("GSHEET_API_URL no configurada.") 
         return jsonify({"error": "La conexión a la fuente de datos secundaria no está configurada."}), 500
@@ -156,12 +154,13 @@ def get_user_profile(identity_number):
         gsheet_data = response.json() 
         
         if gsheet_data.get('success'):
+            logging.info(f"Perfil encontrado para {identity_number}. Datos: {gsheet_data.get('data', 'N/A')}") 
             return jsonify(gsheet_data.get('data'))
         else:
-            logging.warning(f"Perfil de usuario no encontrado para identidad: {identity_number}. Error: {gsheet_data.get('error', 'Desconocido')}") 
+            logging.warning(f"Perfil de usuario NO encontrado para identidad: {identity_number}. Error: {gsheet_data.get('error', 'Desconocido')}") 
             return jsonify({"error": gsheet_data.get('error', 'Usuario no encontrado')}), 404
     except requests.exceptions.RequestException as e:
-        logging.error(f"Error al consultar Google Sheet API: {str(e)}") 
+        logging.error(f"Error al consultar Google Sheet API para {identity_number}: {str(e)}") 
         return jsonify({"error": f"No se pudo consultar la fuente de datos secundaria: {str(e)}"}), 503
 
 @app.route('/login', methods=['POST'])
@@ -322,7 +321,7 @@ def delete_post(post_id):
 @token_required 
 def update_web_config():
     """
-    Actualiza el contenido de la configuración web (misión, visión, imágenes hero, contacto).
+    Actualiza el contenido de la configuración web (misión, visión, imágenes hero, contacto, etc.).
     Protegida por JWT.
     """
     data = request.get_json()
@@ -398,33 +397,23 @@ def chat_with_gemini():
         logging.error(f"Chatbot: Error inesperado en el proxy de Gemini: {e}") 
         return jsonify({"error": "Ocurrió un error inesperado en el servidor al procesar el chat."}), 500
 
-# Este decorador se ejecuta DESPUÉS de cada solicitud
 @app.after_request
 def add_cors_headers(response):
-    # Verificamos si FRONTEND_URL está definida en las variables de entorno de Render
     if FRONTEND_URL:
-        # Esto asegura que la cabecera 'Access-Control-Allow-Origin' se establezca
-        # con la URL exacta de tu frontend en GitHub Pages.
         response.headers['Access-Control-Allow-Origin'] = FRONTEND_URL
         logging.info(f"CORS: Cabecera 'Access-Control-Allow-Origin' establecida a: {FRONTEND_URL}")
     else:
-        # En modo de desarrollo local (si FRONTEND_URL no está establecida), permitimos todas las origenes.
         response.headers['Access-Control-Allow-Origin'] = "*"
         logging.warning("CORS: FRONTEND_URL no está definida. Cabecera 'Access-Control-Allow-Origin' establecida a '*'.")
 
-    # Configuramos los métodos HTTP permitidos
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-    # Configuramos las cabeceras personalizadas que el frontend puede enviar (importante para 'Authorization')
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-    # Esto es crucial si tu frontend envía cookies o tokens de autenticación
     response.headers['Access-Control-Allow-Credentials'] = 'true'
     
     return response
 
 # --- PUNTO DE ENTRADA DE LA APLICACIÓN ---
 if __name__ == '__main__':
-    # Advertencias para desarrollo local si las claves no están definidas
-    # En producción, estas variables se establecerán en Render.com
     if app.config['SECRET_KEY'] is None:
         print("ADVERTENCIA: SECRET_KEY no está configurada en .env. Esto NO es seguro para producción.")
     
@@ -432,6 +421,4 @@ if __name__ == '__main__':
         print("ADVERTENCIA: GEMINI_API_KEY no está configurada en .env.")
         print("El chatbot de Gemini no funcionará correctamente sin ella en este entorno.")
     
-    # Esta línea es para ejecutar en desarrollo local con `python app.py`.
-    # En Render, Gunicorn ejecutará la aplicación usando el Procfile.
     app.run(port=5001)
